@@ -10,6 +10,7 @@ import {
   listConversations,
   patchSummary
 } from '../../conversations.js'
+import { retrievalMessage, retrieve } from '../knowledge.js'
 
 export const conversationsRouter = Router()
 
@@ -21,6 +22,20 @@ function promptMessages(messages) {
   return messages
     .filter((msg) => !msg.error && String(msg.content ?? '').trim())
     .map(({ role, content }) => ({ role, content }))
+}
+
+function sourceRefs(hits) {
+  return hits.map((hit) => ({
+    title: hit.title,
+    updated: hit.updated,
+    source: hit.source
+  }))
+}
+
+function assistantMessage(content, sources, extra = {}) {
+  const message = { role: 'assistant', content, ...extra }
+  if (sources.length) message.sources = sources
+  return message
 }
 
 function beginSse(res) {
@@ -72,6 +87,7 @@ conversationsRouter.post('/:id/messages', async (req, res) => {
   const stored = await getConversation(existing.id)
   const { signal, write } = beginSse(res)
   let assistant = ''
+  let sources = []
 
   try {
     const prepared = await prepareContext({
@@ -90,10 +106,22 @@ conversationsRouter.post('/:id/messages', async (req, res) => {
         summarizedCount: prepared.summarizedCount
       })
     }
+
+    // 检索知识库
+    let hits = []
+    try {
+      hits = await retrieve(text)
+    } catch (error) {
+      console.error('检索失败', error)
+    }
+    const messages = prepared.messages.slice()
+    messages.splice(messages.length - 1, 0, retrievalMessage(hits))
+    sources = sourceRefs(hits)
+    write({ type: 'sources', sources })
     await streamChat({
       provider,
       model,
-      messages: prepared.messages,
+      messages,
       signal,
       onEvent: (event) => {
         if (event.type === 'chunk') {
@@ -103,24 +131,20 @@ conversationsRouter.post('/:id/messages', async (req, res) => {
       }
     })
     if (assistant.trim()) {
-      await appendMessage(existing.id, { role: 'assistant', content: assistant })
+      await appendMessage(existing.id, assistantMessage(assistant, sources))
     }
     if (!signal.aborted) write({ type: 'done', title })
   } catch (error) {
     if (signal.aborted || isAbortError(error)) {
       if (assistant.trim()) {
-        await appendMessage(existing.id, { role: 'assistant', content: assistant })
+        await appendMessage(existing.id, assistantMessage(assistant, sources))
       }
       return
     }
     if (!assistant.trim()) {
-      await appendMessage(existing.id, {
-        role: 'assistant',
-        content: String(error),
-        error: true
-      })
+      await appendMessage(existing.id, assistantMessage(String(error), [], { error: true }))
     } else {
-      await appendMessage(existing.id, { role: 'assistant', content: assistant })
+      await appendMessage(existing.id, assistantMessage(assistant, sources))
     }
     write({ type: 'error', message: String(error) })
   } finally {

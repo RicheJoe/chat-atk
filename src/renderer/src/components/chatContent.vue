@@ -22,8 +22,24 @@
       </div>
       <div v-for="(msg, i) in visibleMessages" :key="i" :class="['row', msg.role]">
         <div class="bubble">
-          {{ msg.content
-          }}<span v-if="isStreaming && i === visibleMessages.length - 1" class="cursor">▍</span>
+          <p v-if="msg.role === 'user'" class="text">{{ msg.content }}</p>
+          <!-- markdown-it 已关闭原始 HTML，只渲染标题、列表、代码和链接 -->
+          <!-- eslint-disable vue/no-v-html -->
+          <div
+            v-else
+            class="md"
+            v-html="renderMarkdown(msg.content, isStreaming && i === visibleMessages.length - 1)"
+          ></div>
+          <!-- eslint-enable vue/no-v-html -->
+          <div v-if="msg.role === 'assistant' && msg.sources?.length" class="sources">
+            <span class="sources-label">依据</span>
+            <ul>
+              <li v-for="item in msg.sources" :key="item.title">
+                <span class="source-title">{{ item.title }}</span>
+                <span class="source-date">{{ item.updated }}</span>
+              </li>
+            </ul>
+          </div>
         </div>
       </div>
     </div>
@@ -40,8 +56,32 @@
 
 <script setup>
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
+import MarkdownIt from 'markdown-it'
 import { DEFAULT_TITLE } from '../conversation'
 import { BFF_ORIGIN, readSse } from '../bffClient'
+
+const markdown = new MarkdownIt({ html: false, linkify: true, breaks: true })
+const renderLinkOpen =
+  markdown.renderer.rules.link_open ||
+  function (tokens, idx, options, _env, self) {
+    return self.renderToken(tokens, idx, options)
+  }
+markdown.renderer.rules.link_open = (tokens, idx, options, env, self) => {
+  tokens[idx].attrSet('target', '_blank')
+  tokens[idx].attrSet('rel', 'noopener noreferrer')
+  return renderLinkOpen(tokens, idx, options, env, self)
+}
+
+function renderMarkdown(content, showCursor) {
+  const html = markdown.render(String(content ?? ''))
+  if (!showCursor) return html
+  const cursor = '<span class="cursor">▍</span>'
+  if (!html) return cursor
+  if (/<\/(p|li|h[1-6]|blockquote|td)>\s*$/.test(html)) {
+    return html.replace(/<\/(p|li|h[1-6]|blockquote|td)>\s*$/, `${cursor}</$1>`)
+  }
+  return `${html}${cursor}`
+}
 
 const props = defineProps({
   conversation: { type: Object, required: true }
@@ -115,6 +155,15 @@ function applyStreamEvent(generation, conversationId, event) {
   if (generation !== streamGeneration || props.conversation.id !== conversationId) return
   if (event.type === 'summary') {
     commit({ summary: event.summary, summarizedCount: event.summarizedCount })
+    return
+  }
+  if (event.type === 'sources') {
+    const messages = props.conversation.messages.slice()
+    const last = messages[messages.length - 1]
+    if (last && last.role === 'assistant') {
+      messages[messages.length - 1] = { ...last, sources: event.sources ?? [] }
+      commit({ messages })
+    }
     return
   }
   if (event.type === 'done' && event.title) {
@@ -305,9 +354,57 @@ select:disabled {
   max-width: min(78%, 640px);
   padding: 10px 14px;
   border-radius: 16px;
+  line-height: 1.55;
+}
+
+.text {
+  margin: 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  line-height: 1.55;
+}
+
+.sources {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.sources-label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: rgba(235, 235, 245, 0.45);
+}
+
+.sources ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sources li {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.source-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: rgba(213, 226, 255, 0.92);
+}
+
+.source-date {
+  flex: none;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: rgba(235, 235, 245, 0.42);
 }
 
 .user .bubble {
@@ -322,7 +419,96 @@ select:disabled {
   border-bottom-left-radius: 5px;
 }
 
-.cursor {
+.md :deep(> :first-child) {
+  margin-top: 0;
+}
+
+.md :deep(> :last-child) {
+  margin-bottom: 0;
+}
+
+.md :deep(p),
+.md :deep(ul),
+.md :deep(ol),
+.md :deep(pre),
+.md :deep(blockquote) {
+  margin: 0.65em 0;
+}
+
+.md :deep(h1),
+.md :deep(h2),
+.md :deep(h3),
+.md :deep(h4) {
+  margin: 0.8em 0 0.35em;
+  font-size: 15px;
+  font-weight: 650;
+  line-height: 1.35;
+}
+
+.md :deep(ul),
+.md :deep(ol) {
+  padding-left: 1.25em;
+}
+
+.md :deep(ol) {
+  list-style: decimal;
+}
+
+.md :deep(ul) {
+  list-style: disc;
+}
+
+.md :deep(ul ul) {
+  list-style: circle;
+}
+
+.md :deep(li + li) {
+  margin-top: 0.25em;
+}
+
+.md :deep(li > p) {
+  margin: 0;
+}
+
+.md :deep(strong) {
+  font-weight: 650;
+  color: #fff;
+}
+
+.md :deep(a) {
+  color: #9eb6ff;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.md :deep(code) {
+  padding: 0.1em 0.35em;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.08);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.92em;
+}
+
+.md :deep(pre) {
+  padding: 10px 12px;
+  overflow-x: auto;
+  border-radius: 10px;
+  background: #16161a;
+}
+
+.md :deep(pre code) {
+  padding: 0;
+  background: transparent;
+}
+
+.md :deep(blockquote) {
+  margin-left: 0;
+  padding-left: 10px;
+  border-left: 2px solid rgba(158, 182, 255, 0.55);
+  color: rgba(235, 235, 245, 0.72);
+}
+
+.md :deep(.cursor) {
   animation: blink 1s step-end infinite;
 }
 
