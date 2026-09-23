@@ -1,17 +1,18 @@
-# my-ai-chat
+# chat-atk
 
-本机桌面聊天应用。界面是 Vue 3，窗口由 Electron 打开，回复由本机 [Ollama](https://ollama.com) 流式生成。对话存在本机 JSON 文件里，不经过云端。
+本机桌面应用，当前演示的是商标注册流程客服。界面是 Vue 3，窗口由 Electron 打开。回复由本机 [Ollama](https://ollama.com) 流式生成，回答前会先检索 `knowledge/trademark/` 里的资料。对话存在本机 JSON 文件里，不经过云端。
 
-默认系统提示是「你是本地助手，用中文回答。」界面优先选用模型 `qwen2.5:7b`，本机没有这个模型时改用已安装列表里的第一个。
+默认系统提示是「你是知识产权流程客服，用中文回答。」界面优先选用聊天模型 `qwen2.5:7b`，本机没有这个模型时改用已安装列表里的第一个。检索用的是另一个模型 `bge-m3`，它也会出现在下拉框里，不要拿它来生成回复。
 
 ## 先准备什么
 
 1. Node.js（建议 20+）和 npm。
 2. 已安装并正在运行的 Ollama。开发环境地址在 `.env.development`，默认 `http://127.0.0.1:11434`。测试环境地址在 `.env.test`。
-3. 至少拉过一个模型，例如：
+3. 两个模型都要拉过。聊天用 `qwen2.5:7b`，把问题变成向量用 `bge-m3`：
 
 ```bash
 ollama pull qwen2.5:7b
+ollama pull bge-m3
 ```
 
 Ollama 没启动，或一台机器上都没有模型时，顶栏下拉框会显示「模型服务未启动」或「无本地模型」，发送按钮不可用。
@@ -49,8 +50,9 @@ npm run build:linux  # Linux
 - **新对话**：左侧按钮。第一条用户消息的前 18 个字会变成标题。
 - **切换 / 删除对话**：点列表项切换；删除当前对话时，若正在生成会先停掉。列表空了会自动再建一条空对话。
 - **选模型**：顶栏下拉框，数据来自本机 Ollama。生成过程中不能切换。
-- **发送**：输入框回车，或点「发送」。助手气泡会逐段长出来。
-- **停止**：中断当前这次生成。还没收到任何字就停掉时，那条空的助手消息不会留下。
+- **发送**：输入框回车，或点「发送」。助手气泡会逐段长出来，标题、列表、加粗和链接按 Markdown 显示。用户自己的消息仍是纯文本。
+- **依据**：这次检索命中的资料标题和日期显示在气泡底部。重新打开对话后还在。
+- **停止**：中断当前这次生成。还没收到任何字就停掉时，那条空的助手消息不会留下。已经生成的文字会连同当时的依据一起保存。
 
 切换对话前，如果上一条还在生成，会先停止并保存。
 
@@ -74,8 +76,13 @@ chatContent.vue / App.vue
 prepareContext                       超长时先摘要旧消息
        │
        ▼
+retrieve                             用 bge-m3 在本地知识库取最多 3 段
+       │
+       ▼
 streamChat → Ollama                  流式 chunk，SSE 回给界面
 ```
+
+检索失败时这次不附资料，仍然继续生成。资料正文只放进这一次请求，不写入会话历史。
 
 模型列表同样直接请求 Express：
 
@@ -95,6 +102,7 @@ src/main/conversations.js         对话读写
 src/main/bff/index.js             Express，端口 8787
 src/main/bff/chat.js              把模型输出转成 chunk / done 事件
 src/main/bff/context.js           上下文裁剪和摘要
+src/main/bff/knowledge.js         切块、建索引、检索
 src/main/bff/routes/models.js     GET /api/models
 src/main/bff/routes/conversations.js  会话的创建、查询、删除和发消息
 src/main/bff/providers/           模型供应商，现在只有 ollama
@@ -103,6 +111,8 @@ src/renderer/src/App.vue          侧边栏、当前对话
 src/renderer/src/bffClient.js     调本机 Express
 src/renderer/src/components/chatContent.vue   消息列表、输入、流式更新
 src/renderer/src/conversation.js  默认标题
+knowledge/trademark/              商标资料，一篇一个主题
+knowledge/trademark-index.json    向量索引，由程序生成
 ```
 
 `Versions.vue` 是脚手架自带组件，当前界面没有用到。
@@ -127,14 +137,16 @@ src/renderer/src/conversation.js  默认标题
   summary: '',             // 被裁掉的旧对话摘要
   summarizedCount: 0,      // 这份摘要已经覆盖了多少条被丢掉的消息
   messages: [
-    { role: 'system', content: '你是本地助手，用中文回答。' },
+    { role: 'system', content: '你是知识产权流程客服，用中文回答。' },
     { role: 'user', content: '...' },
-    { role: 'assistant', content: '...' }
+    { role: 'assistant', content: '...', sources: [
+      { title: '资料标题 / 小节标题', updated: '2026-09-23', source: 'https://...' }
+    ] }
   ]
 }
 ```
 
-保存时会丢掉内容为空的消息。带 `error: true` 的助手消息会留下来（界面上能看到失败原因），但下次发给模型时会过滤掉。系统消息始终保留。
+保存时会丢掉内容为空的消息。带 `error: true` 的助手消息会留下来（界面上能看到失败原因），但下次发给模型时会过滤掉。系统消息始终保留。`sources` 只给界面显示依据，下次发给模型时不会带上。
 
 侧边栏列表只拿 `id`、`title`、`updatedAt`，按更新时间从新到旧排。
 
@@ -150,6 +162,16 @@ src/renderer/src/conversation.js  默认标题
 - 摘要失败或用户中途停止：这次仍用裁剪后的历史回答，不更新摘要。
 
 改预算、摘要字数或系统提示默认值，就改这个文件里的 `TOKEN_BUDGET`、`SUMMARY_RESERVE`、`DEFAULT_SYSTEM`。新建对话时的系统提示在 `src/main/conversations.js` 的 `SYSTEM_PROMPT`，两处要一起改，否则新对话和超长裁剪会各用各的提示。
+
+## 知识库怎么检索
+
+资料放在 `knowledge/trademark/`。一篇一个 Markdown，文首是 `id`、`title`、`updated`、`source`。正文按二级标题切块，一块就是一个 `##` 到下一个 `##` 之前的内容。没有二级标题的文件不会产生知识块。
+
+第一次发消息、或某个 Markdown 比 `knowledge/trademark-index.json` 新时，会用 `bge-m3` 把「标题 + 正文」编成向量并写回这个 JSON。开发时工作目录要在项目根，否则找不到 `knowledge/`。
+
+检索只看当前这条用户消息。和索引算余弦相似度，取得分最高的 3 块；最高分低于 `0.7` 就一块都不附。阈值和条数在 `src/main/bff/knowledge.js` 的 `SCORE_MIN`、`TOP_K`。命中后，在历史和当前问题之间插入一条临时系统消息，要求只根据这些资料回答，费用和期限带上资料日期，不判断能否注册或是否侵权。
+
+主进程日志会打出前 3 名的分数和标题，用来看这次为什么命中或没命中。改完资料后的第一条消息会重建索引，会比平时慢。
 
 ## HTTP 接口
 
@@ -183,7 +205,7 @@ Ollama 连不上时返回 502。
 
 **POST `/api/conversations/:id/messages`**
 
-发送一条用户消息。服务端先把这条消息存下来，再走 `prepareContext` + `streamChat`。响应是 SSE（`text/event-stream`），每行 `data: {JSON}`。客户端断开连接会中止生成，已经生成的文字会写入这条会话。
+发送一条用户消息。服务端先把这条消息存下来，再走 `prepareContext`、知识库检索和 `streamChat`。响应是 SSE（`text/event-stream`），每行 `data: {JSON}`。客户端断开连接会中止生成，已经生成的文字和当时的依据会写入这条会话。
 
 请求体：
 
@@ -198,6 +220,7 @@ Ollama 连不上时返回 502。
 
 | type | 字段 | 含义 |
 | --- | --- | --- |
+| `sources` | `sources` | 这次命中的依据，元素含 `title`、`updated`、`source`。没有命中时是空数组，出现在第一个 `chunk` 之前 |
 | `chunk` | `content` | 增量文本 |
 | `summary` | `summary`, `summarizedCount` | 刚更新的摘要 |
 | `done` | `title` | 正常结束 |
@@ -231,14 +254,17 @@ Ollama 地址来自环境变量 `VITE_OLLAMA_HOST`。`npm run dev` 用 `.env.dev
 
 ## 常见问题
 
-**下拉框是「模型服务未启动」**  
+**下拉框是「模型服务未启动」**
 Ollama 没开，或当前模式的 `VITE_OLLAMA_HOST` 连不上。开发模式先在终端执行 `ollama list` 确认。主进程日志里会有 `BFF http://127.0.0.1:8787`；8787 被占用时应用起不来。
 
-**有 Ollama 但发不出去**  
-本机没有模型。执行 `ollama pull <模型名>`。想改默认优先模型，改 `chatContent.vue` 里的 `PREFERRED_MODEL`。
+**有 Ollama 但发不出去**
+本机没有聊天模型。执行 `ollama pull qwen2.5:7b`。想改默认优先模型，改 `chatContent.vue` 里的 `PREFERRED_MODEL`。
 
-**回复中断或报错出现在气泡里**  
+**回复没有依据，或主进程报 embedding 失败**
+没拉 `bge-m3`，或 `knowledge/trademark-index.json` 是用别的向量模型生成的。拉好模型后删掉这个 JSON，再发一条消息，让它按当前的 `EMBED_MODEL` 重建。
+
+**回复中断或报错出现在气泡里**
 那条消息带 `error: true`，会保存，但不会再送给模型。看主进程终端里的报错，常见是模型名不存在或 Ollama 中途退出。
 
-**重启后对话没了**  
+**重启后对话没了**
 看的是另一份 userData。开发版和打包版的应用名都是 `my-ai-chat`，目录应一致。可以直接打开上面的 `conversations.json` 检查。

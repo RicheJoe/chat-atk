@@ -9,7 +9,7 @@
 - [x] Ollama 流式与非流式调用
 - [x] 超长历史裁剪和摘要
 - [x] 新会话系统提示已改为「知识产权流程客服」
-- [x] `SYSTEM_PROMPT` 与 `DEFAULT_SYSTEM` 已一致。`README.md` 开头和示例仍写着「本地助手」，和运行时无关
+- [x] `SYSTEM_PROMPT` 与 `DEFAULT_SYSTEM` 已一致，README 里的默认提示也已改成知识产权流程客服
 
 ## 1. 商标知识库
 
