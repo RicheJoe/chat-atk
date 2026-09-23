@@ -2,8 +2,13 @@
   <div class="chat">
     <header class="topbar">
       <div>
-        <h1>本地对话</h1>
-        <p>{{ model }}</p>
+        <h1>{{ conversation.title }}</h1>
+        <select v-model="model" :disabled="isStreaming || models.length === 0">
+          <option v-if="models.length === 0" value="">{{ modelsError || '无本地模型' }}</option>
+          <option v-for="item in models" :key="item.name" :value="item.name">
+            {{ item.name }}
+          </option>
+        </select>
       </div>
       <span class="status" :class="{ busy: isStreaming }">
         {{ isStreaming ? '生成中' : '就绪' }}
@@ -11,14 +16,14 @@
     </header>
 
     <div ref="scroller" class="messages">
-      <div v-if="messages.length === 0" class="empty">
+      <div v-if="visibleMessages.length === 0" class="empty">
         <p>发一条消息，开始对话</p>
         <span>回复由本机 Ollama 生成</span>
       </div>
-      <div v-for="(msg, i) in messages" :key="i" :class="['row', msg.role]">
+      <div v-for="(msg, i) in visibleMessages" :key="i" :class="['row', msg.role]">
         <div class="bubble">
           {{ msg.content
-          }}<span v-if="isStreaming && i === messages.length - 1" class="cursor">▍</span>
+          }}<span v-if="isStreaming && i === visibleMessages.length - 1" class="cursor">▍</span>
         </div>
       </div>
     </div>
@@ -35,20 +40,44 @@
 
 <script setup>
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
+import { DEFAULT_TITLE } from '../conversation'
+import { BFF_ORIGIN, readSse } from '../bffClient'
+
+const props = defineProps({
+  conversation: { type: Object, required: true }
+})
+const emit = defineEmits(['change'])
 
 const input = ref('')
-const messages = ref([])
 const isStreaming = ref(false)
 const scroller = ref(null)
-const model = 'qwen2.5:7b'
-const canSend = computed(() => input.value.trim().length > 0 && !isStreaming.value)
+const PREFERRED_MODEL = 'qwen2.5:7b'
+const models = ref([])
+const modelsError = ref('')
+const model = ref('')
+const visibleMessages = computed(() =>
+  (props.conversation.messages ?? []).filter((msg) => msg.role !== 'system')
+)
 
-let stopListening = () => {}
-let nextRequestId = 0
-let streamingRequestId = 0
+function commit(patch) {
+  emit('change', { ...props.conversation, ...patch })
+}
+const canSend = computed(
+  () => input.value.trim().length > 0 && !isStreaming.value && model.value.length > 0
+)
+
+let streamAbort = null
+let streamGeneration = 0
 
 watch(
-  messages,
+  () => props.conversation.id,
+  () => {
+    input.value = ''
+  }
+)
+
+watch(
+  () => props.conversation.messages,
   async () => {
     await nextTick()
     const el = scroller.value
@@ -58,96 +87,130 @@ watch(
 )
 
 onMounted(() => {
-  if (!window.ollamaApi) return
-  const offs = [
-    window.ollamaApi.onChunk(({ requestId, content }) => {
-      if (requestId !== streamingRequestId || !content) return
-      const last = messages.value[messages.value.length - 1]
-      if (last && last.role === 'assistant') {
-        last.content += content
-      }
-    }),
-    window.ollamaApi.onDone(({ requestId }) => {
-      if (requestId !== streamingRequestId) return
-      isStreaming.value = false
-    }),
-    window.ollamaApi.onError(({ requestId, error }) => {
-      if (requestId !== streamingRequestId) return
-      console.error('Ollama error:', error)
-      const last = messages.value[messages.value.length - 1]
-      if (last && last.role === 'assistant' && !last.content) {
-        last.content = String(error)
-      }
-      isStreaming.value = false
-    })
-  ]
-
-  stopListening = () => offs.forEach((off) => off?.())
+  loadModels()
 })
 
 onUnmounted(() => {
-  stopListening()
-  if (isStreaming.value && window.ollamaApi) {
-    window.ollamaApi.abort(streamingRequestId)
-  }
+  streamAbort?.abort()
 })
+
+async function loadModels() {
+  try {
+    const response = await fetch(`${BFF_ORIGIN}/api/models`)
+    if (!response.ok) throw new Error(`模型列表 ${response.status}`)
+    const data = await response.json()
+    models.value = Array.isArray(data.models) ? data.models : []
+    modelsError.value = ''
+    const preferred = models.value.find((item) => item.name === PREFERRED_MODEL)
+    model.value = preferred?.name || models.value[0]?.name || ''
+  } catch (error) {
+    models.value = []
+    model.value = ''
+    modelsError.value = '模型服务未启动'
+    console.error(error)
+  }
+}
+
+function applyStreamEvent(generation, conversationId, event) {
+  if (generation !== streamGeneration || props.conversation.id !== conversationId) return
+  if (event.type === 'summary') {
+    commit({ summary: event.summary, summarizedCount: event.summarizedCount })
+    return
+  }
+  if (event.type === 'done' && event.title) {
+    commit({ title: event.title })
+    return
+  }
+  if (event.type === 'chunk' && event.content) {
+    const messages = props.conversation.messages.slice()
+    const last = messages[messages.length - 1]
+    if (last && last.role === 'assistant') {
+      messages[messages.length - 1] = { ...last, content: last.content + event.content }
+      commit({ messages })
+    }
+    return
+  }
+  if (event.type === 'error') {
+    console.error(event.message)
+    const messages = props.conversation.messages.slice()
+    const last = messages[messages.length - 1]
+    if (last && last.role === 'assistant' && !last.content) {
+      messages[messages.length - 1] = { ...last, content: String(event.message), error: true }
+      commit({ messages })
+    }
+  }
+}
 
 async function sendMessage() {
   const text = input.value.trim()
   if (!text || isStreaming.value) return
 
-  const requestId = ++nextRequestId
-  streamingRequestId = requestId
-  messages.value.push({ role: 'user', content: text })
-  messages.value.push({ role: 'assistant', content: '' })
+  const generation = ++streamGeneration
+  const conversationId = props.conversation.id
+  const controller = new AbortController()
+  streamAbort = controller
+  commit({
+    title:
+      props.conversation.title === DEFAULT_TITLE ? text.slice(0, 18) : props.conversation.title,
+    messages: [
+      ...props.conversation.messages,
+      { role: 'user', content: text },
+      { role: 'assistant', content: '' }
+    ]
+  })
   input.value = ''
   isStreaming.value = true
 
-  const history = messages.value
-    .slice(0, -1)
-    .map((msg) => ({ role: msg.role, content: msg.content }))
-
   try {
-    await window.ollamaApi.chat(requestId, model, history)
-  } catch (err) {
-    if (requestId !== streamingRequestId) return
-    console.error('Ollama error:', err)
-    const last = messages.value[messages.value.length - 1]
-    if (last && last.role === 'assistant' && !last.content) {
-      last.content = String(err)
+    const response = await fetch(`${BFF_ORIGIN}/api/conversations/${conversationId}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: text, model: model.value }),
+      signal: controller.signal
+    })
+    if (!response.ok || !response.body) {
+      const data = await response.json().catch(() => ({}))
+      throw new Error(data.message || `发送失败 ${response.status}`)
     }
+    await readSse(response, (event) => applyStreamEvent(generation, conversationId, event))
+  } catch (err) {
+    if (err.name === 'AbortError' || generation !== streamGeneration) return
+    console.error(err)
+    applyStreamEvent(generation, conversationId, { type: 'error', message: String(err) })
   } finally {
-    if (requestId === streamingRequestId) {
+    if (generation === streamGeneration) {
       isStreaming.value = false
+      streamAbort = null
     }
   }
 }
 
 function dropEmptyAssistant() {
-  const last = messages.value[messages.value.length - 1]
+  const messages = props.conversation.messages
+  const last = messages[messages.length - 1]
   if (last?.role === 'assistant' && !last.content) {
-    messages.value.pop()
+    commit({ messages: messages.slice(0, -1) })
   }
 }
 
 async function stopStreaming() {
-  if (!isStreaming.value || !window.ollamaApi) return
-  const requestId = streamingRequestId
-  streamingRequestId = 0
+  if (!isStreaming.value) return
+  streamGeneration += 1
   isStreaming.value = false
   dropEmptyAssistant()
-  try {
-    await window.ollamaApi.abort(requestId)
-  } catch (err) {
-    console.error('停止生成失败:', err)
-  }
+  streamAbort?.abort()
+  streamAbort = null
 }
+
+defineExpose({ isStreaming, stopStreaming })
 </script>
 
 <style scoped>
 .chat {
   display: flex;
+  flex: 1;
   flex-direction: column;
+  min-width: 0;
   height: 100%;
   background: #16161a;
   color: rgba(255, 255, 245, 0.88);
@@ -167,10 +230,19 @@ async function stopStreaming() {
   line-height: 1.2;
 }
 
-.topbar p {
-  margin-top: 2px;
+select {
+  margin-top: 4px;
+  max-width: 220px;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: rgba(235, 235, 245, 0.62);
+  font: inherit;
   font-size: 12px;
-  color: rgba(235, 235, 245, 0.48);
+}
+
+select:disabled {
+  opacity: 0.45;
 }
 
 .status {

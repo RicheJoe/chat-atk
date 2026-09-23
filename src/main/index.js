@@ -2,15 +2,15 @@ import { app, shell, BrowserWindow, ipcMain } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
-import { Ollama } from 'ollama'
-const ollama = new Ollama({
-  host: 'http://127.0.0.1:11434'
-})
+import { startBff } from './bff/index'
+
+let bffServer
+
 function createWindow() {
   // Create the browser window.
   const mainWindow = new BrowserWindow({
-    width: 900,
-    height: 670,
+    width: 1080,
+    height: 720,
     show: false,
     autoHideMenuBar: true,
     ...(process.platform === 'linux' ? { icon } : {}),
@@ -41,7 +41,9 @@ function createWindow() {
 // This method will be called when Electron has finished
 // initialization and is ready to create browser windows.
 // Some APIs can only be used after this event occurs.
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  bffServer = await startBff()
+
   // Set app user model id for windows
   electronApp.setAppUserModelId('com.electron')
 
@@ -73,78 +75,6 @@ app.on('window-all-closed', () => {
   }
 })
 
-// In this file you can include the rest of your app's specific main process
-// code. You can also put them in separate files and require them here.
-
-const chatSessions = new Map()
-const abortedRequestIds = new Set()
-
-function isAbortError(error) {
-  return error?.name === 'AbortError' || error?.code === 'ABORT_ERR'
-}
-
-function sendToRenderer(sender, channel, payload) {
-  if (!sender.isDestroyed()) {
-    sender.send(channel, payload)
-  }
-}
-
-// 渲染进程点“停止”时，按 requestId 中断对应的 Ollama 流
-ipcMain.handle('ollama-abort', (_event, requestId) => {
-  abortedRequestIds.add(requestId)
-  const session = chatSessions.get(requestId)
-  if (session) {
-    session.aborted = true
-    session.stream?.abort()
-  }
-  return { success: true }
-})
-
-// 核心：监听渲染进程的对话请求，流式转发给 Ollama，并逐块回传
-ipcMain.handle('ollama-chat', async (event, { requestId, model, messages }) => {
-  if (abortedRequestIds.has(requestId)) {
-    abortedRequestIds.delete(requestId)
-    sendToRenderer(event.sender, 'ollama-done', { requestId, aborted: true })
-    return { success: true, aborted: true }
-  }
-
-  const session = { requestId, aborted: false, stream: null }
-  chatSessions.set(requestId, session)
-
-  try {
-    const stream = await ollama.chat({
-      model,
-      messages,
-      stream: true
-    })
-    session.stream = stream
-
-    if (session.aborted) {
-      stream.abort()
-    }
-
-    for await (const chunk of stream) {
-      if (session.aborted) {
-        stream.abort()
-        break
-      }
-      const content = chunk.message?.content
-      if (content) {
-        sendToRenderer(event.sender, 'ollama-chunk', { requestId, content })
-      }
-    }
-
-    sendToRenderer(event.sender, 'ollama-done', { requestId, aborted: session.aborted })
-    return { success: true, aborted: session.aborted }
-  } catch (error) {
-    if (session.aborted || isAbortError(error)) {
-      sendToRenderer(event.sender, 'ollama-done', { requestId, aborted: true })
-      return { success: true, aborted: true }
-    }
-    sendToRenderer(event.sender, 'ollama-error', { requestId, error: String(error) })
-    return { success: false, error: String(error) }
-  } finally {
-    chatSessions.delete(requestId)
-    abortedRequestIds.delete(requestId)
-  }
+app.on('before-quit', () => {
+  bffServer?.close()
 })
