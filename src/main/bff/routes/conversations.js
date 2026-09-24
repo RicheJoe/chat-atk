@@ -10,7 +10,6 @@ import {
   listConversations,
   patchSummary
 } from '../../conversations.js'
-import { retrievalMessage, retrieve } from '../knowledge.js'
 
 export const conversationsRouter = Router()
 
@@ -32,9 +31,10 @@ function sourceRefs(hits) {
   }))
 }
 
-function assistantMessage(content, sources, extra = {}) {
+function assistantMessage(content, sources, queries, extra = {}) {
   const message = { role: 'assistant', content, ...extra }
   if (sources.length) message.sources = sources
+  if (queries.length) message.queries = queries
   return message
 }
 
@@ -88,6 +88,7 @@ conversationsRouter.post('/:id/messages', async (req, res) => {
   const { signal, write } = beginSse(res)
   let assistant = ''
   let sources = []
+  let queries = []
 
   try {
     const prepared = await prepareContext({
@@ -107,44 +108,46 @@ conversationsRouter.post('/:id/messages', async (req, res) => {
       })
     }
 
-    // 检索知识库
-    let hits = []
-    try {
-      hits = await retrieve(text)
-    } catch (error) {
-      console.error('检索失败', error)
-    }
-    const messages = prepared.messages.slice()
-    messages.splice(messages.length - 1, 0, retrievalMessage(hits))
-    sources = sourceRefs(hits)
-    write({ type: 'sources', sources })
     await streamChat({
-      provider,
       model,
-      messages,
+      messages: prepared.messages,
+      query: text,
       signal,
-      onEvent: (event) => {
-        if (event.type === 'chunk') {
-          assistant += event.content
-          write(event)
+      onSources(hits) {
+        sources = sourceRefs(hits)
+        write({ type: 'sources', sources })
+      },
+      onChunk(content) {
+        assistant += content
+        write({ type: 'chunk', content })
+      },
+      onTool(event) {
+        if (event.status === 'running') {
+          queries.push({ name: event.name, label: event.label, status: 'running' })
+        } else {
+          const current = queries.find(
+            (item) => item.name === event.name && item.status === 'running'
+          )
+          if (current) current.status = 'done'
         }
+        write({ type: 'tool', name: event.name, label: event.label, status: event.status })
       }
     })
     if (assistant.trim()) {
-      await appendMessage(existing.id, assistantMessage(assistant, sources))
+      await appendMessage(existing.id, assistantMessage(assistant, sources, queries))
     }
     if (!signal.aborted) write({ type: 'done', title })
   } catch (error) {
     if (signal.aborted || isAbortError(error)) {
       if (assistant.trim()) {
-        await appendMessage(existing.id, assistantMessage(assistant, sources))
+        await appendMessage(existing.id, assistantMessage(assistant, sources, queries))
       }
       return
     }
     if (!assistant.trim()) {
-      await appendMessage(existing.id, assistantMessage(String(error), [], { error: true }))
+      await appendMessage(existing.id, assistantMessage(String(error), [], [], { error: true }))
     } else {
-      await appendMessage(existing.id, assistantMessage(assistant, sources))
+      await appendMessage(existing.id, assistantMessage(assistant, sources, queries))
     }
     write({ type: 'error', message: String(error) })
   } finally {

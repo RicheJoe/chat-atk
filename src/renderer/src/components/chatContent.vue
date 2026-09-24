@@ -23,14 +23,20 @@
       <div v-for="(msg, i) in visibleMessages" :key="i" :class="['row', msg.role]">
         <div class="bubble">
           <p v-if="msg.role === 'user'" class="text">{{ msg.content }}</p>
-          <!-- markdown-it 已关闭原始 HTML，只渲染标题、列表、代码和链接 -->
-          <!-- eslint-disable vue/no-v-html -->
-          <div
-            v-else
-            class="md"
-            v-html="renderMarkdown(msg.content, isStreaming && i === visibleMessages.length - 1)"
-          ></div>
-          <!-- eslint-enable vue/no-v-html -->
+          <template v-else>
+            <div v-if="msg.queries?.length" class="queries">
+              <p v-for="(item, queryIndex) in msg.queries" :key="`${item.name}-${queryIndex}`">
+                {{ item.status === 'running' ? '正在查询' : '已查询' }}：{{ item.label }}
+              </p>
+            </div>
+            <!-- markdown-it 已关闭原始 HTML，只渲染标题、列表、代码和链接 -->
+            <!-- eslint-disable vue/no-v-html -->
+            <div
+              class="md"
+              v-html="renderMarkdown(msg.content, isStreaming && i === visibleMessages.length - 1)"
+            ></div>
+            <!-- eslint-enable vue/no-v-html -->
+          </template>
           <div v-if="msg.role === 'assistant' && msg.sources?.length" class="sources">
             <span class="sources-label">依据</span>
             <ul>
@@ -108,6 +114,7 @@ const canSend = computed(
 
 let streamAbort = null
 let streamGeneration = 0
+let streamMessages = null
 
 watch(
   () => props.conversation.id,
@@ -151,19 +158,37 @@ async function loadModels() {
   }
 }
 
+function patchAssistant(patch) {
+  if (!streamMessages) return
+  const messages = streamMessages.slice()
+  const last = messages[messages.length - 1]
+  if (!last || last.role !== 'assistant') return
+  messages[messages.length - 1] = { ...last, ...patch }
+  streamMessages = messages
+  commit({ messages })
+}
+
 function applyStreamEvent(generation, conversationId, event) {
   if (generation !== streamGeneration || props.conversation.id !== conversationId) return
   if (event.type === 'summary') {
     commit({ summary: event.summary, summarizedCount: event.summarizedCount })
     return
   }
-  if (event.type === 'sources') {
-    const messages = props.conversation.messages.slice()
-    const last = messages[messages.length - 1]
-    if (last && last.role === 'assistant') {
-      messages[messages.length - 1] = { ...last, sources: event.sources ?? [] }
-      commit({ messages })
+  if (event.type === 'tool') {
+    const last = streamMessages?.[streamMessages.length - 1]
+    if (!last || last.role !== 'assistant') return
+    const queries = (last.queries ?? []).slice()
+    if (event.status === 'running') {
+      queries.push({ name: event.name, label: event.label, status: 'running' })
+    } else {
+      const current = queries.find((item) => item.name === event.name && item.status === 'running')
+      if (current) current.status = 'done'
     }
+    patchAssistant({ queries })
+    return
+  }
+  if (event.type === 'sources') {
+    patchAssistant({ sources: event.sources ?? [] })
     return
   }
   if (event.type === 'done' && event.title) {
@@ -171,21 +196,17 @@ function applyStreamEvent(generation, conversationId, event) {
     return
   }
   if (event.type === 'chunk' && event.content) {
-    const messages = props.conversation.messages.slice()
-    const last = messages[messages.length - 1]
+    const last = streamMessages?.[streamMessages.length - 1]
     if (last && last.role === 'assistant') {
-      messages[messages.length - 1] = { ...last, content: last.content + event.content }
-      commit({ messages })
+      patchAssistant({ content: last.content + event.content })
     }
     return
   }
   if (event.type === 'error') {
     console.error(event.message)
-    const messages = props.conversation.messages.slice()
-    const last = messages[messages.length - 1]
+    const last = streamMessages?.[streamMessages.length - 1]
     if (last && last.role === 'assistant' && !last.content) {
-      messages[messages.length - 1] = { ...last, content: String(event.message), error: true }
-      commit({ messages })
+      patchAssistant({ content: String(event.message), error: true })
     }
   }
 }
@@ -198,14 +219,15 @@ async function sendMessage() {
   const conversationId = props.conversation.id
   const controller = new AbortController()
   streamAbort = controller
+  streamMessages = [
+    ...props.conversation.messages,
+    { role: 'user', content: text },
+    { role: 'assistant', content: '' }
+  ]
   commit({
     title:
       props.conversation.title === DEFAULT_TITLE ? text.slice(0, 18) : props.conversation.title,
-    messages: [
-      ...props.conversation.messages,
-      { role: 'user', content: text },
-      { role: 'assistant', content: '' }
-    ]
+    messages: streamMessages
   })
   input.value = ''
   isStreaming.value = true
@@ -230,6 +252,7 @@ async function sendMessage() {
     if (generation === streamGeneration) {
       isStreaming.value = false
       streamAbort = null
+      streamMessages = null
     }
   }
 }
@@ -361,6 +384,17 @@ select:disabled {
   margin: 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.queries {
+  margin-bottom: 8px;
+}
+
+.queries p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: rgba(235, 235, 245, 0.62);
 }
 
 .sources {

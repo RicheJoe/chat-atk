@@ -1,6 +1,8 @@
 import { readdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { join } from 'path'
-import { Ollama } from 'ollama'
+import { Document } from '@langchain/core/documents'
+import { BaseRetriever } from '@langchain/core/retrievers'
+import { OllamaEmbeddings } from '@langchain/ollama'
 import { ChromaClient } from 'chromadb'
 
 const COLLECTION = 'trademark'
@@ -37,7 +39,7 @@ const TOP_K = 3
 const SCORE_MIN = 0.7
 const host =
   import.meta.env?.VITE_OLLAMA_HOST || process.env.VITE_OLLAMA_HOST || 'http://127.0.0.1:11434'
-const client = new Ollama({ host })
+const embeddings = new OllamaEmbeddings({ model: EMBED_MODEL, baseUrl: host })
 
 const knowledgeDir = join(process.cwd(), 'knowledge/trademark')
 const stampPath = join(process.cwd(), 'knowledge/.chroma-stamp')
@@ -80,12 +82,8 @@ export function chunkKnowledge(filename, raw) {
 }
 
 async function embed(text) {
-  const result = await client.embed({
-    model: EMBED_MODEL,
-    input: text
-  })
-  const vector = result.embeddings?.[0]
-  if (!vector) throw new Error('Failed to embed text')
+  const vector = await embeddings.embedQuery(text)
+  if (!vector?.length) throw new Error('Failed to embed text')
   return vector
 }
 
@@ -101,15 +99,14 @@ async function readChunks() {
 
 export async function buildIndex() {
   const chunks = await readChunks()
-  const embeddings = []
-  for (const chunk of chunks) {
-    embeddings.push(await embed(`${chunk.title}\n${chunk.text}`))
-  }
+  const vectors = chunks.length
+    ? await embeddings.embedDocuments(chunks.map((chunk) => `${chunk.title}\n${chunk.text}`))
+    : []
   const collection = await openCollection()
   if (chunks.length) {
     await collection.upsert({
       ids: chunks.map((chunk) => chunk.id),
-      embeddings,
+      embeddings: vectors,
       documents: chunks.map((chunk) => chunk.text),
       metadatas: chunks.map((chunk) => ({
         title: chunk.title,
@@ -153,37 +150,70 @@ async function syncIndex() {
     // 还没有标记文件，需要建索引
   }
   const collection = await openCollection()
-  const ready =
-    stampTime >= newest && stampModel === EMBED_MODEL && (await collection.count()) > 0
+  const ready = stampTime >= newest && stampModel === EMBED_MODEL && (await collection.count()) > 0
   if (ready) return
   await buildIndex()
   await writeFile(stampPath, EMBED_MODEL)
 }
 
-export async function retrieve(query) {
-  await loadIndex()
-  const collection = await openCollection()
-  const queryVector = await embed(query)
-  const result = await collection.query({
-    queryEmbeddings: [queryVector],
-    nResults: TOP_K
-  })
-  const ranked = (result.rows()[0] ?? []).map((row) => ({
-    title: row.metadata?.title ?? '',
-    updated: row.metadata?.updated ?? '',
-    source: row.metadata?.source ?? '',
-    text: row.document ?? '',
-    score: 1 - (row.distance ?? 1)
+class TrademarkRetriever extends BaseRetriever {
+  lc_namespace = ['my-ai-chat', 'retrievers']
+
+  async _getRelevantDocuments(query) {
+    await loadIndex()
+    const collection = await openCollection()
+    const queryVector = await embed(query)
+    const result = await collection.query({
+      queryEmbeddings: [queryVector],
+      nResults: TOP_K
+    })
+    const ranked = (result.rows()[0] ?? []).map((row) => ({
+      title: row.metadata?.title ?? '',
+      updated: row.metadata?.updated ?? '',
+      source: row.metadata?.source ?? '',
+      text: row.document ?? '',
+      score: 1 - (row.distance ?? 1)
+    }))
+    console.log(
+      '检索',
+      ranked.map((hit) => `${hit.score.toFixed(3)} ${hit.title}`)
+    )
+    return ranked
+      .filter((hit) => hit.score >= SCORE_MIN)
+      .map(
+        (hit) =>
+          new Document({
+            pageContent: hit.text,
+            metadata: {
+              title: hit.title,
+              updated: hit.updated,
+              source: hit.source,
+              score: hit.score
+            }
+          })
+      )
+  }
+}
+
+export const trademarkRetriever = new TrademarkRetriever()
+
+export function documentsToHits(docs) {
+  return (docs ?? []).map((doc) => ({
+    title: doc.metadata?.title ?? '',
+    updated: doc.metadata?.updated ?? '',
+    source: doc.metadata?.source ?? '',
+    text: doc.pageContent ?? '',
+    score: doc.metadata?.score ?? 0
   }))
-  console.log(
-    '检索',
-    ranked.map((hit) => `${hit.score.toFixed(3)} ${hit.title}`)
-  )
-  return ranked.filter((hit) => hit.score >= SCORE_MIN)
+}
+
+export async function retrieve(query) {
+  return documentsToHits(await trademarkRetriever.invoke(query))
 }
 const RULES = [
-  '以下是本次检索到的资料。只根据这些资料回答，不要用资料以外的流程、费用或材料。',
-  '费用和期限必须带上资料里的更新日期。',
+  '以下是本次检索到的资料。流程和期限只根据这些资料回答。',
+  '费用金额和材料清单以工具返回为准。工具写明未收录时，回答未收录，不要心算。',
+  '费用和期限必须带上资料或工具里的更新日期。',
   '资料之间的期限不一致时，分别说明出处和施行日期，不要合成一句「现在就是这样」。',
   '没有资料，或资料写明未收录金额、手续时，回答未收录。',
   '不要判断某个商标能否注册、是否近似或是否侵权。'
@@ -193,7 +223,8 @@ export function retrievalMessage(hits) {
   if (!hits.length) {
     return {
       role: 'system',
-      content: '本次没有检索到可用资料。不要凭记忆回答费用、期限、材料和转让手续，直接说明未收录。'
+      content:
+        '本次没有检索到可用资料。不要凭记忆回答费用、期限、材料和转让手续。若调用了工具，只根据工具返回回答；工具未收录的金额直接说明未收录。'
     }
   }
   const blocks = hits.map(

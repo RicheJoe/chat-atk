@@ -1,4 +1,9 @@
+import { ChatPromptTemplate } from '@langchain/core/prompts'
+import { RunnableLambda, RunnableSequence } from '@langchain/core/runnables'
 import { getProvider } from './providers/index.js'
+import { messageText, modelFor } from './providers/ollama.js'
+
+const summaryPrompt = ChatPromptTemplate.fromMessages([['human', '{prompt}']])
 
 const TOKEN_BUDGET = 6000
 const SUMMARY_RESERVE = 400
@@ -52,27 +57,42 @@ export function buildContextMessages({ messages, summary = '' }) {
   return { messages: prompt, dropped, droppedCount: dropped.length }
 }
 
-async function summarize({ provider, model, summary, dropped, signal }) {
-  const complete = getProvider(provider).complete
-  if (typeof complete !== 'function' || dropped.length === 0) return ''
-
+function summaryPromptText({ summary, dropped }) {
   const transcript = dropped
     .map((msg) => `${msg.role === 'user' ? '用户' : '助手'}：${msg.content}`)
     .join('\n')
   const clipped = transcript.length > 4000 ? transcript.slice(-4000) : transcript
-  const prompt = [
+  return [
     '请把对话压缩成可继续聊天的中文摘要，保留身份、偏好、决定和未完成事项。控制在 300 字以内。',
     summary ? `已有摘要：\n${summary}` : '',
     `新增对话：\n${clipped}`
   ]
     .filter(Boolean)
     .join('\n\n')
+}
 
-  return complete({
-    model,
-    messages: [{ role: 'user', content: prompt }],
-    signal
-  })
+function summaryChain(model) {
+  return RunnableSequence.from([
+    RunnableLambda.from((input) => ({ prompt: summaryPromptText(input) })),
+    summaryPrompt,
+    modelFor(model)
+  ])
+}
+
+function abortError() {
+  const error = new Error('Aborted')
+  error.name = 'AbortError'
+  return error
+}
+
+async function summarize({ provider, model, summary, dropped, signal }) {
+  getProvider(provider)
+  if (dropped.length === 0) return ''
+  if (signal?.aborted) throw abortError()
+
+  const result = await summaryChain(model).invoke({ summary, dropped }, { signal })
+  if (signal?.aborted) throw abortError()
+  return messageText(result).trim()
 }
 
 export async function prepareContext({
