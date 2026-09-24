@@ -21,6 +21,7 @@
   "dependencies": {
     "@electron-toolkit/preload": "^3.0.2",
     "@electron-toolkit/utils": "^4.0.0",
+    "chromadb": "^3.5.0",
     "express": "^5.2.1",
     "markdown-it": "^15.0.2",
     "ollama": "^0.6.3"

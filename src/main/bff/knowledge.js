@@ -1,6 +1,36 @@
 import { readdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { join } from 'path'
 import { Ollama } from 'ollama'
+import { ChromaClient } from 'chromadb'
+
+const COLLECTION = 'trademark'
+const chroma = new ChromaClient({
+  ssl: false,
+  host: '127.0.0.1',
+  port: 8000
+})
+
+function isCosine(collection) {
+  return collection.configuration?.hnsw?.space === 'cosine'
+}
+
+async function openCollection() {
+  try {
+    const current = await chroma.getCollection({
+      name: COLLECTION,
+      embeddingFunction: null
+    })
+    if (isCosine(current)) return current
+    await chroma.deleteCollection({ name: COLLECTION })
+  } catch {
+    // 集合还不存在
+  }
+  return chroma.createCollection({
+    name: COLLECTION,
+    embeddingFunction: null,
+    configuration: { hnsw: { space: 'cosine' } }
+  })
+}
 
 const EMBED_MODEL = 'bge-m3'
 const TOP_K = 3
@@ -10,7 +40,7 @@ const host =
 const client = new Ollama({ host })
 
 const knowledgeDir = join(process.cwd(), 'knowledge/trademark')
-const indexPath = join(process.cwd(), 'knowledge/trademark-index.json')
+const stampPath = join(process.cwd(), 'knowledge/.chroma-stamp')
 
 // 解析 front matter
 function parseFrontMatter(raw) {
@@ -30,7 +60,7 @@ function parseFrontMatter(raw) {
 // 分块 解析 markdown 文件
 export function chunkKnowledge(filename, raw) {
   const { meta, body } = parseFrontMatter(raw)
-  if (meta.index === false) return []
+  if (meta.index === 'false') return []
   const parts = body.split(/^## /m).slice(1)
   return parts
     .map((part) => {
@@ -59,18 +89,6 @@ async function embed(text) {
   return vector
 }
 
-function cosine(a, b) {
-  let dot = 0
-  let na = 0
-  let nb = 0
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i]
-    na += a[i] * a[i]
-    nb += b[i] * b[i]
-  }
-  return dot / (Math.sqrt(na) * Math.sqrt(nb))
-}
-
 async function readChunks() {
   const files = (await readdir(knowledgeDir)).filter((name) => name.endsWith('.md'))
   const chunks = []
@@ -83,35 +101,35 @@ async function readChunks() {
 
 export async function buildIndex() {
   const chunks = await readChunks()
-  const items = []
+  const embeddings = []
   for (const chunk of chunks) {
-    const vector = await embed(`${chunk.title}\n${chunk.text}`)
-    items.push({ ...chunk, vector })
+    embeddings.push(await embed(`${chunk.title}\n${chunk.text}`))
   }
-  await writeFile(indexPath, JSON.stringify({ model: EMBED_MODEL, items }))
-  return items.length
+  const collection = await openCollection()
+  if (chunks.length) {
+    await collection.upsert({
+      ids: chunks.map((chunk) => chunk.id),
+      embeddings,
+      documents: chunks.map((chunk) => chunk.text),
+      metadatas: chunks.map((chunk) => ({
+        title: chunk.title,
+        updated: chunk.updated,
+        source: chunk.source
+      }))
+    })
+  }
+  const existing = await collection.get({ include: [] })
+  const keep = new Set(chunks.map((chunk) => chunk.id))
+  const stale = existing.ids.filter((id) => !keep.has(id))
+  if (stale.length) await collection.delete({ ids: stale })
+  return chunks.length
 }
+
 let indexPromise = null
+
 async function loadIndex() {
   if (!indexPromise) {
-    indexPromise = (async () => {
-      try {
-        const indexStat = await stat(indexPath)
-        const files = (await readdir(knowledgeDir)).filter((name) => name.endsWith('.md'))
-        const newest = Math.max(
-          ...(await Promise.all(
-            files.map(async (name) => (await stat(join(knowledgeDir, name))).mtimeMs)
-          ))
-        )
-        if (indexStat.mtimeMs >= newest) {
-          return JSON.parse(await readFile(indexPath, 'utf8')).items
-        }
-      } catch {
-        // 索引不存在就重建
-      }
-      await buildIndex()
-      return JSON.parse(await readFile(indexPath, 'utf8')).items
-    })().catch((error) => {
+    indexPromise = syncIndex().catch((error) => {
       indexPromise = null
       throw error
     })
@@ -119,18 +137,49 @@ async function loadIndex() {
   return indexPromise
 }
 
+async function syncIndex() {
+  const files = (await readdir(knowledgeDir)).filter((name) => name.endsWith('.md'))
+  const newest = Math.max(
+    ...(await Promise.all(
+      files.map(async (name) => (await stat(join(knowledgeDir, name))).mtimeMs)
+    ))
+  )
+  let stampTime = 0
+  let stampModel = ''
+  try {
+    stampTime = (await stat(stampPath)).mtimeMs
+    stampModel = (await readFile(stampPath, 'utf8')).trim()
+  } catch {
+    // 还没有标记文件，需要建索引
+  }
+  const collection = await openCollection()
+  const ready =
+    stampTime >= newest && stampModel === EMBED_MODEL && (await collection.count()) > 0
+  if (ready) return
+  await buildIndex()
+  await writeFile(stampPath, EMBED_MODEL)
+}
+
 export async function retrieve(query) {
-  const items = await loadIndex()
+  await loadIndex()
+  const collection = await openCollection()
   const queryVector = await embed(query)
-  const ranked = items
-    .map((item) => ({ ...item, score: cosine(queryVector, item.vector) }))
-    .sort((a, b) => b.score - a.score)
+  const result = await collection.query({
+    queryEmbeddings: [queryVector],
+    nResults: TOP_K
+  })
+  const ranked = (result.rows()[0] ?? []).map((row) => ({
+    title: row.metadata?.title ?? '',
+    updated: row.metadata?.updated ?? '',
+    source: row.metadata?.source ?? '',
+    text: row.document ?? '',
+    score: 1 - (row.distance ?? 1)
+  }))
   console.log(
     '检索',
-    ranked.slice(0, TOP_K).map((item) => `${item.score.toFixed(3)} ${item.title}`)
+    ranked.map((hit) => `${hit.score.toFixed(3)} ${hit.title}`)
   )
-  if (!ranked.length || ranked[0].score < SCORE_MIN) return []
-  return ranked.slice(0, TOP_K).map(({ vector, ...hit }) => hit)
+  return ranked.filter((hit) => hit.score >= SCORE_MIN)
 }
 const RULES = [
   '以下是本次检索到的资料。只根据这些资料回答，不要用资料以外的流程、费用或材料。',

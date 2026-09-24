@@ -112,7 +112,7 @@ src/renderer/src/bffClient.js     调本机 Express
 src/renderer/src/components/chatContent.vue   消息列表、输入、流式更新
 src/renderer/src/conversation.js  默认标题
 knowledge/trademark/              商标资料，一篇一个主题
-knowledge/trademark-index.json    向量索引，由程序生成
+knowledge/.chroma-stamp           上次写入 Chroma 的模型名，用来判断要不要重建
 ```
 
 `Versions.vue` 是脚手架自带组件，当前界面没有用到。
@@ -165,13 +165,15 @@ knowledge/trademark-index.json    向量索引，由程序生成
 
 ## 知识库怎么检索
 
-资料放在 `knowledge/trademark/`。一篇一个 Markdown，文首是 `id`、`title`、`updated`、`source`。正文按二级标题切块，一块就是一个 `##` 到下一个 `##` 之前的内容。没有二级标题的文件不会产生知识块。
+资料放在 `knowledge/trademark/`。一篇一个 Markdown，文首是 `id`、`title`、`updated`、`source`。正文按二级标题切块，一块就是一个 `##` 到下一个 `##` 之前的内容。没有二级标题的文件不会产生知识块。文首写 `index: false` 的文件整篇跳过。
 
-第一次发消息、或某个 Markdown 比 `knowledge/trademark-index.json` 新时，会用 `bge-m3` 把「标题 + 正文」编成向量并写回这个 JSON。开发时工作目录要在项目根，否则找不到 `knowledge/`。
+向量存在本机 Chroma 的 `trademark` 集合里，地址是 `http://127.0.0.1:8000`。先启动 Chroma，再发消息。距离用余弦。集合如果已经按别的距离建过，下次重建会删掉它再按余弦创建。
 
-检索只看当前这条用户消息。和索引算余弦相似度，取得分最高的 3 块；最高分低于 `0.7` 就一块都不附。阈值和条数在 `src/main/bff/knowledge.js` 的 `SCORE_MIN`、`TOP_K`。命中后，在历史和当前问题之间插入一条临时系统消息，要求只根据这些资料回答，费用和期限带上资料日期，不判断能否注册或是否侵权。
+`knowledge/.chroma-stamp` 记下上次用的向量模型。Markdown 比这个文件新、模型名变了、集合是空的，或距离不是余弦时，用 `bge-m3` 把「标题 + 正文」重新写入。已经从资料里删掉的段落会从集合里去掉。开发时工作目录要在项目根，否则找不到 `knowledge/`。
 
-主进程日志会打出前 3 名的分数和标题，用来看这次为什么命中或没命中。改完资料后的第一条消息会重建索引，会比平时慢。
+检索只看当前这条用户消息。取得分最高的 3 块；Chroma 的余弦距离换成相似度后，低于 `0.7` 的不附。阈值和条数在 `src/main/bff/knowledge.js` 的 `SCORE_MIN`、`TOP_K`。命中后，在历史和当前问题之间插入一条临时系统消息，要求只根据这些资料回答，费用和期限带上资料日期，不判断能否注册或是否侵权。
+
+主进程日志会打出这 3 块的分数和标题。改完资料后的第一条消息会重建索引，会比平时慢。
 
 ## HTTP 接口
 
@@ -260,8 +262,8 @@ Ollama 没开，或当前模式的 `VITE_OLLAMA_HOST` 连不上。开发模式�
 **有 Ollama 但发不出去**
 本机没有聊天模型。执行 `ollama pull qwen2.5:7b`。想改默认优先模型，改 `chatContent.vue` 里的 `PREFERRED_MODEL`。
 
-**回复没有依据，或主进程报 embedding 失败**
-没拉 `bge-m3`，或 `knowledge/trademark-index.json` 是用别的向量模型生成的。拉好模型后删掉这个 JSON，再发一条消息，让它按当前的 `EMBED_MODEL` 重建。
+**回复没有依据，或主进程报 embedding 失败**  
+Chroma 没开在 `127.0.0.1:8000`，或没拉 `bge-m3`。拉好模型后删掉 `knowledge/.chroma-stamp`，再发一条消息，让它按当前的 `EMBED_MODEL` 重建集合。
 
 **回复中断或报错出现在气泡里**
 那条消息带 `error: true`，会保存，但不会再送给模型。看主进程终端里的报错，常见是模型名不存在或 Ollama 中途退出。
