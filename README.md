@@ -1,6 +1,6 @@
 # chat-atk
 
-本机桌面应用，当前演示的是商标注册流程客服。界面是 Vue 3，窗口由 Electron 打开。回复由本机 [Ollama](https://ollama.com) 流式生成，回答前会先检索 `knowledge/trademark/` 里的资料。对话存在本机 JSON 文件里，不经过云端。
+本机桌面应用，当前演示的是商标注册流程客服。界面是 Vue 3，窗口由 Electron 打开。回复由本机 [Ollama](https://ollama.com) 流式生成。回答前会先检索 `knowledge/trademark/` 里的资料；问类别、材料或官费时，再调用本机三个工具。对话存在本机 JSON 文件里，不经过云端。
 
 默认系统提示是「你是知识产权流程客服，用中文回答。」界面优先选用聊天模型 `qwen2.5:7b`，本机没有这个模型时改用已安装列表里的第一个。检索用的是另一个模型 `bge-m3`，它也会出现在下拉框里，不要拿它来生成回复。
 
@@ -52,7 +52,8 @@ npm run build:linux  # Linux
 - **选模型**：顶栏下拉框，数据来自本机 Ollama。生成过程中不能切换。
 - **发送**：输入框回车，或点「发送」。助手气泡会逐段长出来，标题、列表、加粗和链接按 Markdown 显示。用户自己的消息仍是纯文本。
 - **依据**：这次检索命中的资料标题和日期显示在气泡底部。重新打开对话后还在。
-- **停止**：中断当前这次生成。还没收到任何字就停掉时，那条空的助手消息不会留下。已经生成的文字会连同当时的依据一起保存。
+- **正在查询**：模型调用工具时，气泡上方先显示「正在查询：候选类别 / 材料清单 / 费用」，完成后改成「已查询」。这和底部的检索依据分开。重新打开对话后查询记录还在。
+- **停止**：中断当前这次生成。还没收到任何字就停掉时，那条空的助手消息不会留下。已经生成的文字会连同当时的依据和查询记录一起保存。
 
 切换对话前，如果上一条还在生成，会先停止并保存。
 
@@ -79,10 +80,13 @@ prepareContext                       超长时先摘要旧消息
 retrieve                             用 bge-m3 在本地知识库取最多 3 段
        │
        ▼
-streamChat → Ollama                  流式 chunk，SSE 回给界面
+streamChat → Ollama                  需要时调用本地工具，再把结果组织成回复
+       │
+       ▼
+SSE                                  chunk / tool / sources 回给界面
 ```
 
-检索失败时这次不附资料，仍然继续生成。资料正文只放进这一次请求，不写入会话历史。
+检索失败时这次不附资料，仍然继续生成。资料正文和工具返回的 JSON 只放进这一次请求，不写入会话历史。
 
 模型列表同样直接请求 Express：
 
@@ -103,6 +107,7 @@ src/main/bff/index.js             Express，端口 8787
 src/main/bff/chat.js              把模型输出转成 chunk / done 事件
 src/main/bff/context.js           上下文裁剪和摘要
 src/main/bff/knowledge.js         切块、建索引、检索
+src/main/bff/tools.js             候选类别、材料清单、费用三个本地工具
 src/main/bff/routes/models.js     GET /api/models
 src/main/bff/routes/conversations.js  会话的创建、查询、删除和发消息
 src/main/bff/providers/           模型供应商，现在只有 ollama
@@ -139,14 +144,16 @@ knowledge/.chroma-stamp           上次写入 Chroma 的模型名，用来判�
   messages: [
     { role: 'system', content: '你是知识产权流程客服，用中文回答。' },
     { role: 'user', content: '...' },
-    { role: 'assistant', content: '...', sources: [
-      { title: '资料标题 / 小节标题', updated: '2026-09-23', source: 'https://...' }
-    ] }
+    { role: 'assistant', content: '...',
+      queries: [{ name: 'list_materials', label: '材料清单', status: 'done' }],
+      sources: [
+        { title: '资料标题 / 小节标题', updated: '2026-09-23', source: 'https://...' }
+      ] }
   ]
 }
 ```
 
-保存时会丢掉内容为空的消息。带 `error: true` 的助手消息会留下来（界面上能看到失败原因），但下次发给模型时会过滤掉。系统消息始终保留。`sources` 只给界面显示依据，下次发给模型时不会带上。
+保存时会丢掉内容为空的消息。带 `error: true` 的助手消息会留下来（界面上能看到失败原因），但下次发给模型时会过滤掉。系统消息始终保留。`sources` 和 `queries` 只给界面显示，下次发给模型时不会带上。
 
 侧边栏列表只拿 `id`、`title`、`updatedAt`，按更新时间从新到旧排。
 
@@ -171,9 +178,21 @@ knowledge/.chroma-stamp           上次写入 Chroma 的模型名，用来判�
 
 `knowledge/.chroma-stamp` 记下上次用的向量模型。Markdown 比这个文件新、模型名变了、集合是空的，或距离不是余弦时，用 `bge-m3` 把「标题 + 正文」重新写入。已经从资料里删掉的段落会从集合里去掉。开发时工作目录要在项目根，否则找不到 `knowledge/`。
 
-检索只看当前这条用户消息。取得分最高的 3 块；Chroma 的余弦距离换成相似度后，低于 `0.7` 的不附。阈值和条数在 `src/main/bff/knowledge.js` 的 `SCORE_MIN`、`TOP_K`。命中后，在历史和当前问题之间插入一条临时系统消息，要求只根据这些资料回答，费用和期限带上资料日期，不判断能否注册或是否侵权。
+检索只看当前这条用户消息。取得分最高的 3 块；Chroma 的余弦距离换成相似度后，低于 `0.7` 的不附。阈值和条数在 `src/main/bff/knowledge.js` 的 `SCORE_MIN`、`TOP_K`。命中后，在历史和当前问题之间插入一条临时系统消息：流程和期限只根据这些资料回答，费用和材料以工具返回为准，日期要带上，不判断能否注册或是否侵权。没有命中时，这条消息要求不要凭记忆回答费用、期限和材料。
 
 主进程日志会打出这 3 块的分数和标题。改完资料后的第一条消息会重建索引，会比平时慢。
+
+## 三个工具
+
+类别、材料和官费不靠检索正文，走 `src/main/bff/tools.js` 里的本地规则。模型用 LangChain 的 `bindTools` 决定要不要调用；一次回复最多执行一轮，再把 JSON 组织成中文。
+
+| 工具 | 界面名称 | 输入 | 返回 |
+| --- | --- | --- | --- |
+| `suggest_class` | 候选类别 | 商品或服务描述 | 只在第九、二十五、三十、三十五、四十三类里给候选。对不上就说明未覆盖 |
+| `list_materials` | 材料清单 | 申请人类型 | 国内自然人、国内法人、其他组织、农村承包经营户的清单。认不出类型时要求先问清 |
+| `estimate_fee` | 费用 | 类别数 | 当前摘录没有金额。`recorded` 为 false，`amount` 为空。问多少钱必须调用，不能心算 |
+
+工具说明在同文件的 `toolGuide` 里，每次请求都会附上。`estimate_fee` 写明未收录时，回复里不能出现金额。
 
 ## HTTP 接口
 
@@ -223,6 +242,7 @@ Ollama 连不上时返回 502。
 | type | 字段 | 含义 |
 | --- | --- | --- |
 | `sources` | `sources` | 这次命中的依据，元素含 `title`、`updated`、`source`。没有命中时是空数组，出现在第一个 `chunk` 之前 |
+| `tool` | `name`, `label`, `status` | 工具开始是 `running`，结束是 `done`。`label` 是「候选类别」「材料清单」或「费用」 |
 | `chunk` | `content` | 增量文本 |
 | `summary` | `summary`, `summarizedCount` | 刚更新的摘要 |
 | `done` | `title` | 正常结束 |
