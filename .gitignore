@@ -6,3 +6,4 @@ out
 .DS_Store
 .eslintcache
 *.log*
+eval/last-run.json

@@ -4,6 +4,7 @@ import { Document } from '@langchain/core/documents'
 import { BaseRetriever } from '@langchain/core/retrievers'
 import { OllamaEmbeddings } from '@langchain/ollama'
 import { ChromaClient } from 'chromadb'
+import { clipText } from './promptUsage.js'
 
 const COLLECTION = 'trademark'
 const chroma = new ChromaClient({
@@ -216,7 +217,8 @@ const RULES = [
   '费用和期限必须带上资料或工具里的更新日期。',
   '资料之间的期限不一致时，分别说明出处和施行日期，不要合成一句「现在就是这样」。',
   '没有资料，或资料写明未收录金额、手续时，回答未收录。',
-  '不要判断某个商标能否注册、是否近似或是否侵权。'
+  '不要判断某个商标能否注册、是否近似或是否侵权。',
+  '用「结论」「依据」「下一步」三个小标题组织回答。'
 ].join('\n')
 
 export function retrievalMessage(hits) {
@@ -224,12 +226,13 @@ export function retrievalMessage(hits) {
     return {
       role: 'system',
       content:
-        '本次没有检索到可用资料。不要凭记忆回答费用、期限、材料和转让手续。若调用了工具，只根据工具返回回答；工具未收录的金额直接说明未收录。'
+        '本次没有检索到可用资料。不要凭记忆回答费用、期限、材料和转让手续。若调用了工具，只根据工具返回回答；工具未收录的金额直接说明未收录。回答仍用「结论」「依据」「下一步」三个小标题。'
     }
   }
-  const blocks = hits.map(
-    (hit) =>
-      `资料标题：${hit.title}\n更新日期：${hit.updated}\n来源：${hit.source}\n正文：\n${hit.text}`
-  )
+  const blocks = hits.map((hit) => {
+    const passage = clipText(hit.text)
+    const clipped = passage.clipped ? '\n（正文过长，已截断后再送入。）' : ''
+    return `资料标题：${hit.title}\n更新日期：${hit.updated}\n来源：${hit.source}\n正文：\n${passage.text}${clipped}`
+  })
   return { role: 'system', content: `${RULES}\n\n${blocks.join('\n\n')}` }
 }

@@ -3,6 +3,7 @@ import { ChatPromptTemplate, MessagesPlaceholder } from '@langchain/core/prompts
 import { RunnableLambda, RunnableSequence } from '@langchain/core/runnables'
 import { concat } from '@langchain/core/utils/stream'
 import { documentsToHits, retrievalMessage, trademarkRetriever } from './knowledge.js'
+import { measureParts } from './promptUsage.js'
 import { messageText, modelFor } from './providers/ollama.js'
 import { TOOL_LABELS, toolGuide, trademarkTools } from './tools.js'
 
@@ -16,25 +17,47 @@ const answerPrompt = ChatPromptTemplate.fromMessages([
 ])
 
 function prepareChain(onSources) {
-  return RunnableSequence.from([
-    RunnableLambda.from(async ({ messages, query }, config) => {
-      let hits = []
-      try {
-        hits = documentsToHits(await trademarkRetriever.invoke(query, config))
-      } catch (error) {
-        if (config?.signal?.aborted || error?.name === 'AbortError') throw error
-        console.error('检索失败', error)
-      }
-      onSources?.(hits)
-      return {
-        prefix: messages.slice(0, -1),
-        retrieval: [retrievalMessage(hits)],
-        guide: [toolGuide],
-        question: messages.slice(-1)
-      }
-    }),
-    answerPrompt
-  ])
+  return RunnableLambda.from(async ({ messages, query }, config) => {
+    let hits = []
+    try {
+      hits = documentsToHits(await trademarkRetriever.invoke(query, config))
+    } catch (error) {
+      if (config?.signal?.aborted || error?.name === 'AbortError') throw error
+      console.error('检索失败', error)
+    }
+    onSources?.(hits)
+    const parts = {
+      prefix: messages.slice(0, -1),
+      retrieval: [retrievalMessage(hits)],
+      guide: [toolGuide],
+      question: messages.slice(-1)
+    }
+    const formatted = await answerPrompt.invoke(parts, config)
+    return { parts, messages: formatted.messages }
+  })
+}
+
+function textOf(message) {
+  if (!message) return ''
+  return messageText(message) || (typeof message.content === 'string' ? message.content : '')
+}
+
+function reportUsage(parts, extra = []) {
+  const system = parts.prefix.filter((item) => item.role === 'system')
+  const history = [
+    ...parts.prefix.filter((item) => item.role !== 'system'),
+    ...parts.question,
+    ...extra.filter((item) => item?.role !== 'tool' && !item?.tool_call_id)
+  ]
+  const tools = extra.filter((item) => item?.role === 'tool' || item?.tool_call_id)
+  const usage = measureParts({
+    system: [...system, ...parts.guide].map(textOf).join('\n'),
+    knowledge: parts.retrieval.map(textOf).join('\n'),
+    history: history.map(textOf).join('\n'),
+    tools: tools.map(textOf).join('\n')
+  })
+  console.log('送入字数', usage)
+  return usage
 }
 
 function toolArgs(call) {
@@ -105,10 +128,14 @@ export async function streamChat({ model, messages, query, signal, onSources, on
   const llm = modelFor(model).bindTools(trademarkTools)
   const first = await emitStream(await llm.stream(history, { signal }), signal, onChunk)
   const calls = first?.tool_calls ?? []
-  if (!calls.length || signal?.aborted) return
+  if (!calls.length || signal?.aborted) {
+    reportUsage(prepared.parts)
+    return
+  }
 
   const toolMessages = await runTools(calls, signal, onTool)
   if (!toolMessages.length || signal?.aborted) return
+  reportUsage(prepared.parts, [first, ...toolMessages])
   await emitStream(
     await modelFor(model).stream([...history, first, ...toolMessages], { signal }),
     signal,

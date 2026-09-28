@@ -1,9 +1,10 @@
 import { app } from 'electron'
 import { mkdir, readFile, writeFile } from 'fs/promises'
 import { join } from 'path'
+import { SYSTEM_PROMPT } from './bff/prompt.js'
 
 export const DEFAULT_TITLE = '新对话'
-export const SYSTEM_PROMPT = '你是知识产权流程客服，用中文回答。'
+export { SYSTEM_PROMPT }
 
 let conversations = null
 let writing = Promise.resolve()

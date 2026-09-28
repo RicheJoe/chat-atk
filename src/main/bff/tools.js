@@ -104,10 +104,17 @@ const MATERIALS = {
 }
 
 const FEE_SOURCE = {
-  updated: '2026-09-23',
-  sourceTitle: '分类、材料和费用',
-  source: 'https://sbj.cnipa.gov.cn/zcwj/2026/0829/40039.html',
-  basis: '《商标法》（2026年修正）第八十六条。自 2027-01-01 起施行。收费标准另定。'
+  updated: '2026-09-28',
+  sourceTitle: '规费清单',
+  source: 'https://sbj.cnipa.gov.cn/sfbz/index.html',
+  effective: '2019-07-01',
+  basis:
+    '计价格〔1995〕2404号、发改价格〔2015〕2136号、财税〔2017〕20号、发改价格〔2019〕914号。自 2019-07-01 起实施。只计算受理商标注册费，不含代理费。'
+}
+
+const REGISTRATION_FEE = {
+  paper: { perClass: 300, extraPerItem: 30 },
+  online: { perClass: 270, extraPerItem: 27 }
 }
 
 export const TOOL_LABELS = {
@@ -207,17 +214,63 @@ function listMaterials({ applicantType }) {
   }
 }
 
-function estimateFee({ classCount }) {
+function normalizeChannel(value) {
+  const text = String(value ?? '').trim()
+  if (!text) return ''
+  if (/纸/.test(text)) return 'paper'
+  if (/网|电子/.test(text)) return 'online'
+  return ''
+}
+
+function lineAmount(rate, classCount, extraItemCount) {
+  return rate.perClass * classCount + rate.extraPerItem * extraItemCount
+}
+
+function estimateFee({ classCount, channel, extraItemCount }) {
   const count = Number(classCount)
   const valid = Number.isInteger(count) && count > 0
-  return {
+  const extra = Number(extraItemCount)
+  const extraCount = Number.isInteger(extra) && extra > 0 ? extra : 0
+  const selected = normalizeChannel(channel)
+  const note =
+    extraCount > 0
+      ? `已按超出合计 ${extraCount} 个商品加收。每类含 10 个商品，超出个数以用户说明为准。`
+      : '按每类 10 个商品以内计算。超过 10 个时，纸质每个加收 30 元，网上每个加收 27 元。'
+  const result = {
     ...FEE_SOURCE,
-    recorded: false,
+    recorded: true,
+    includedItems: 10,
     classCount: valid ? count : null,
+    extraItemCount: extraCount,
+    channel:
+      selected === 'paper' ? '纸质申请' : selected === 'online' ? '接受电子发文的网上申请' : '',
     amount: null,
-    message: valid
-      ? `已记下 ${count} 个类别，但摘录页面没有一类多少钱，也没有超出项目如何加收。不能推算金额，回答未收录。`
-      : '还没有有效的类别数。即便有类别数，当前摘录也没有金额，不能报数。'
+    online: null,
+    paper: null
+  }
+  if (!valid) {
+    return {
+      ...result,
+      message: '还没有有效的类别数。先问清要注册几类，再按规费清单计算。不要编造金额。'
+    }
+  }
+  const online = lineAmount(REGISTRATION_FEE.online, count, extraCount)
+  const paper = lineAmount(REGISTRATION_FEE.paper, count, extraCount)
+  if (!selected) {
+    return {
+      ...result,
+      online,
+      paper,
+      message: `规费清单同时列出两种受理商标注册费：网上申请 ${online} 元，纸质申请 ${paper} 元。用户没说明方式时两个数都要说。${note}`
+    }
+  }
+  const amount = selected === 'paper' ? paper : online
+  return {
+    ...result,
+    amount,
+    online,
+    paper,
+    message: `${result.channel}的受理商标注册费是 ${amount} 元。${note}`
   }
 }
 
@@ -245,9 +298,17 @@ export const trademarkTools = [
   tool(async (input) => JSON.stringify(estimateFee(input)), {
     name: 'estimate_fee',
     description:
-      '按类别数查询官费。当前知识库没有收费金额，工具不会返回数字。用户问多少钱时必须调用，禁止自己心算。',
+      '按类别数查询受理商标注册费。金额只来自规费清单。用户问多少钱时必须调用，禁止自己心算。没说网上还是纸质时不要猜一种方式。',
     schema: z.object({
-      classCount: z.coerce.number().describe('要注册的类别数量。用户没说就填 0')
+      classCount: z.coerce.number().describe('要注册的类别数量。用户没说就填 0'),
+      channel: z
+        .string()
+        .optional()
+        .describe('纸质或网上。用户没说明申请方式就留空，不要默认成其中一种'),
+      extraItemCount: z.coerce
+        .number()
+        .optional()
+        .describe('超出每类 10 个商品的个数合计。用户没说就填 0')
     })
   })
 ]
@@ -257,7 +318,8 @@ export const toolGuide = {
   content: [
     '需要候选类别、申请材料或官费时调用工具，不要凭记忆编造。',
     'suggest_class 只覆盖第九、二十五、三十、三十五、四十三类。',
-    'estimate_fee 的 recorded 为 false 时，回答未收录，禁止写出任何金额。',
-    '把工具返回组织成中文，并带上其中的更新日期和来源标题。'
+    'estimate_fee 的 recorded 为 false，或 amount、online、paper 都为空时，回答未收录，禁止写出任何金额。',
+    'amount 为空但 online 和 paper 都有数字时，网上和纸质两个金额都要写，不要只留一个。',
+    '只使用工具返回的数字，并带上其中的更新日期和来源标题。'
   ].join('\n')
 }

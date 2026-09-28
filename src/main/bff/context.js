@@ -1,5 +1,6 @@
 import { ChatPromptTemplate } from '@langchain/core/prompts'
 import { RunnableLambda, RunnableSequence } from '@langchain/core/runnables'
+import { SYSTEM_PROMPT } from './prompt.js'
 import { getProvider } from './providers/index.js'
 import { messageText, modelFor } from './providers/ollama.js'
 
@@ -7,7 +8,7 @@ const summaryPrompt = ChatPromptTemplate.fromMessages([['human', '{prompt}']])
 
 const TOKEN_BUDGET = 6000
 const SUMMARY_RESERVE = 400
-const DEFAULT_SYSTEM = '你是知识产权流程客服，用中文回答。'
+const DEFAULT_SYSTEM = SYSTEM_PROMPT
 
 function estimateTokens(text) {
   return Array.from(text ?? '').length

@@ -1,0 +1,117 @@
+[
+  {
+    "id": "duration",
+    "path": "简单问答",
+    "question": "商标注册大概要多久",
+    "titles": ["商标注册的审查和核准 / 从申请到发证的顺序"],
+    "tools": [],
+    "mustMention": ["九个月"],
+    "mustNot": ["能过审", "通过率"]
+  },
+  {
+    "id": "fee",
+    "path": "简单问答",
+    "question": "一类大概多少钱",
+    "titles": ["规费清单 / 受理商标注册费"],
+    "tools": ["estimate_fee"],
+    "mustMention": ["270", "300"],
+    "mustNot": ["代理费大约"],
+    "toolCheck": {
+      "name": "estimate_fee",
+      "input": { "classCount": 1 },
+      "expect": { "recorded": true, "amount": null, "online": 270, "paper": 300 }
+    }
+  },
+  {
+    "id": "individual",
+    "path": "简单问答",
+    "question": "个体户能申请吗",
+    "titles": ["商标注册申请常见问题 / 国内自然人要交什么"],
+    "tools": ["list_materials"],
+    "mustMention": ["营业执照"],
+    "toolCheck": {
+      "name": "list_materials",
+      "input": { "applicantType": "个体户" },
+      "expect": { "known": true, "applicantType": "国内自然人" }
+    }
+  },
+  {
+    "id": "clothes",
+    "path": "办事引导",
+    "question": "卖衣服的商标注册属于哪一类",
+    "titles": [],
+    "tools": ["suggest_class"],
+    "mustMention": ["第二十五类"],
+    "toolCheck": {
+      "name": "suggest_class",
+      "input": { "description": "卖衣服" },
+      "expect": { "covered": true, "classNos": [25] }
+    }
+  },
+  {
+    "id": "food",
+    "path": "办事引导",
+    "question": "我卖食品，应该报第三十类吗",
+    "titles": [],
+    "tools": ["suggest_class"],
+    "mustNot": ["直接报第三十类"],
+    "toolCheck": {
+      "name": "suggest_class",
+      "input": { "description": "卖食品" },
+      "expect": { "needClarify": true, "classNos": [] }
+    }
+  },
+  {
+    "id": "start",
+    "path": "办事引导",
+    "question": "我想注册一个商标",
+    "titles": [],
+    "tools": [],
+    "mustMention": ["申请人"],
+    "mustNot": ["第九类", "270"]
+  },
+  {
+    "id": "boundary",
+    "path": "边界",
+    "question": "这个名字和某某大牌像不像，能不能过审",
+    "titles": ["客服不能下的结论 / 客服不能判断能否注册或是否近似"],
+    "tools": [],
+    "mustMention": ["不能"],
+    "mustNot": ["可以过审", "不构成近似", "通过率"],
+    "refuse": true
+  },
+  {
+    "id": "review",
+    "path": "简单问答",
+    "question": "驳回通知送达后多久可以复审",
+    "titles": ["商标注册的审查和核准 / 驳回之后怎么办"],
+    "tools": [],
+    "mustMention": ["十五"]
+  },
+  {
+    "id": "company",
+    "path": "办事引导",
+    "question": "我们是公司，申请商标要交什么材料",
+    "titles": ["商标注册申请常见问题 / 国内法人和其他组织要交什么"],
+    "tools": ["list_materials"],
+    "mustMention": ["公章"],
+    "toolCheck": {
+      "name": "list_materials",
+      "input": { "applicantType": "公司" },
+      "expect": { "known": true, "applicantType": "国内法人" }
+    }
+  },
+  {
+    "id": "software",
+    "path": "办事引导",
+    "question": "做一个手机软件的商标是哪一类",
+    "titles": [],
+    "tools": ["suggest_class"],
+    "mustMention": ["第九类"],
+    "toolCheck": {
+      "name": "suggest_class",
+      "input": { "description": "手机软件" },
+      "expect": { "covered": true, "classNos": [9] }
+    }
+  }
+]

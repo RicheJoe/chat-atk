@@ -50,13 +50,27 @@
       </div>
     </div>
 
-    <form class="composer" @submit.prevent="sendMessage">
-      <input v-model="input" placeholder="输入消息，Enter 发送" />
-      <button type="submit" :disabled="!canSend">发送</button>
-      <button type="button" class="stop" :disabled="!isStreaming" @click="stopStreaming">
-        停止
-      </button>
-    </form>
+    <div class="foot">
+      <p class="disclaimer">本对话是商标注册流程咨询，不构成法律意见。</p>
+      <div class="suggestions">
+        <button
+          v-for="item in suggestions"
+          :key="item"
+          type="button"
+          :disabled="!canAsk"
+          @click="askSuggestion(item)"
+        >
+          {{ item }}
+        </button>
+      </div>
+      <form class="composer" @submit.prevent="sendMessage">
+        <input v-model="input" placeholder="输入消息，Enter 发送" />
+        <button type="submit" :disabled="!canSend">发送</button>
+        <button type="button" class="stop" :disabled="!isStreaming" @click="stopStreaming">
+          停止
+        </button>
+      </form>
+    </div>
   </div>
 </template>
 
@@ -108,9 +122,17 @@ const visibleMessages = computed(() =>
 function commit(patch) {
   emit('change', { ...props.conversation, ...patch })
 }
+const suggestions = [
+  '商标注册大概要多久',
+  '一类大概多少钱',
+  '个体户能申请吗',
+  '我想注册一个商标',
+  '这个名字和某某大牌像不像，能不能过审'
+]
 const canSend = computed(
   () => input.value.trim().length > 0 && !isStreaming.value && model.value.length > 0
 )
+const canAsk = computed(() => !isStreaming.value && model.value.length > 0)
 
 let streamAbort = null
 let streamGeneration = 0
@@ -209,6 +231,12 @@ function applyStreamEvent(generation, conversationId, event) {
       patchAssistant({ content: String(event.message), error: true })
     }
   }
+}
+
+async function askSuggestion(text) {
+  if (!canAsk.value) return
+  input.value = text
+  await sendMessage()
 }
 
 async function sendMessage() {
@@ -552,10 +580,37 @@ select:disabled {
   }
 }
 
+.foot {
+  margin: 0 16px 16px;
+}
+
+.disclaimer {
+  margin: 0 4px 8px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: rgba(235, 235, 245, 0.45);
+}
+
+.suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.suggestions button {
+  border-radius: 999px;
+  padding: 6px 12px;
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(213, 226, 255, 0.92);
+  font-size: 12px;
+  font-weight: 500;
+}
+
 .composer {
   display: flex;
   gap: 8px;
-  margin: 0 16px 16px;
+  margin: 0;
   padding: 8px 8px 8px 16px;
   background: #222228;
   border: 1px solid rgba(255, 255, 255, 0.08);
